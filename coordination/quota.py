@@ -1,13 +1,15 @@
-"""按客户端维度的并发配额：限制同一客户端同时在途的请求数。
+"""通用的按客户端并发许可原语：限制同一客户端同时被占用的许可数。
 
 - 超限立即以 QUOTA_EXCEEDED 拒绝，不排队、不隐式等待。
 - 许可通过上下文管理器归还，异常路径也会释放，不留状态残留。
+- Coordinator 用它按“并发持有数”计费；也可单独按“在途请求数”复用。
 """
 
 from __future__ import annotations
 
 import threading
 from types import TracebackType
+from typing import Self
 
 from .errors import LeaseRejected, RejectionReason
 
@@ -22,7 +24,12 @@ class ClientQuota:
         self._lock = threading.Lock()
         self._in_flight: dict[str, int] = {}
 
-    def acquire(self, client: str) -> "QuotaPermit":
+    @property
+    def limit(self) -> int:
+        """每个客户端的并发上限（只读）。"""
+        return self._max
+
+    def acquire(self, client: str) -> QuotaPermit:
         """获取一个并发许可，超限抛 LeaseRejected(QUOTA_EXCEEDED)。"""
         with self._lock:
             current = self._in_flight.get(client, 0)
@@ -56,7 +63,7 @@ class QuotaPermit:
         self._client = client
         self._released = False
 
-    def __enter__(self) -> "QuotaPermit":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(

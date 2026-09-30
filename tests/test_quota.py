@@ -30,9 +30,8 @@ def test_quota_limit_enforced_per_client():
 
 def test_permit_released_on_exception():
     q = ClientQuota(max_concurrent=1)
-    with pytest.raises(RuntimeError):
-        with q.acquire("c1"):
-            raise RuntimeError("simulated failure")
+    with pytest.raises(RuntimeError), q.acquire("c1"):
+        raise RuntimeError("simulated failure")
     print("[输入] 许可作用域内抛异常")
     print(f"[判定] 异常路径也归还许可，in_flight={q.in_flight('c1')} 应为 0")
     assert q.in_flight("c1") == 0
@@ -71,7 +70,19 @@ def test_concurrent_quota_never_exceeded():
         t.start()
     for t in threads:
         t.join()
-    print(f"[输入] 8 线程并发申请 max=4 的配额")
+    print("[输入] 8 线程并发申请 max=4 的配额")
     print(f"[判定] 峰值在途={peak}，应 <= 4；结束后 in_flight={q.in_flight('c1')} 应为 0")
     assert peak <= 4
     assert q.in_flight("c1") == 0
+
+
+def test_quota_primitive_remains_generic():
+    """ClientQuota 仍是通用许可原语：Coordinator 用它按“持有”计费，
+    直接复用也可按“在途请求”计费，拒绝原因恒为 QUOTA_EXCEEDED。"""
+    q = ClientQuota(max_concurrent=1)
+    with q.acquire("c1"):
+        with pytest.raises(LeaseRejected) as exc:
+            q.acquire("c1")
+        assert exc.value.reason is RejectionReason.QUOTA_EXCEEDED
+    assert q.in_flight("c1") == 0
+    print("[判定] 通用配额原语行为不变：超限拒绝、退出归还")

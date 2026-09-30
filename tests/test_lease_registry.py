@@ -140,7 +140,7 @@ def test_retry_after_failure_no_double_hold(registry: LeaseRegistry, clock: Manu
     # 模拟 alice 第一次续租请求超时（未到达），租约到期后重试获取
     clock.advance(6)
     retry = registry.acquire("res", "alice", ttl=5)
-    print(f"[输入] alice 租约 ttl=5 过期后重试获取")
+    print("[输入] alice 租约 ttl=5 过期后重试获取")
     print(f"[判定] 旧 token={first.fencing_token} -> 新 token={retry.fencing_token}，严格递增")
     assert retry.fencing_token > first.fencing_token
     # 旧凭证已彻底失效：不能访问、不能释放
