@@ -98,10 +98,10 @@ def test_concurrent_duplicate_requests_apply_once():
     assert coord.holder_of("race-res").fencing_token == results[0].fencing_token
 
 
-def test_failed_first_attempt_leaves_no_residue():
+def test_failed_first_attempt_leaves_no_residue_and_replays_same_rejection():
     coord = Coordinator(ManualClock(), max_concurrent_per_client=5)
     holder_lease = coord.acquire("hot", "holder", ttl=10)
-    # A 首次带键占用失败（被他人持有）：不落账、不留许可、无双持有
+    # A 首次带键占用失败（被他人持有）：落账首次结论、不留许可、无双持有
     with pytest.raises(LeaseRejected) as exc:
         coord.acquire("hot", "A", ttl=10, idem_key="fail-1")
     assert exc.value.reason is RejectionReason.HELD_BY_OTHER
@@ -110,10 +110,29 @@ def test_failed_first_attempt_leaves_no_residue():
           f"token={coord.holder_of('hot').fencing_token}")
     assert coord.in_flight("A") == 0
     assert coord.holder_of("hot") == holder_lease
-    # holder 释放后，用同一个键重试是全新一次操作，可以成功
+
+    # 仍然冲突时拿同一个键重试：原样回放首次结论，不重新判定、不换发凭证
+    with pytest.raises(LeaseRejected) as replay_exc:
+        coord.acquire("hot", "A", ttl=10, idem_key="fail-1")
+    assert replay_exc.value.reason is RejectionReason.HELD_BY_OTHER
+    assert coord.in_flight("A") == 0
+    assert coord.holder_of("hot") == holder_lease
+
+    # 即使 holder 释放、冲突解除，同键重放仍返回首次的拒绝结论，
+    # 不会悄悄占上资源、不增加持有数
     coord.release("hot", "holder", holder_lease.fencing_token)
-    lease = coord.acquire("hot", "A", ttl=10, idem_key="fail-1")
-    print(f"[判定] 释放后同键重试成功 token={lease.fencing_token}，在途={coord.in_flight('A')}")
+    with pytest.raises(LeaseRejected) as after_release:
+        coord.acquire("hot", "A", ttl=10, idem_key="fail-1")
+    print("[判定] holder 释放后用 fail-1 重试：仍回放首次 held_by_other 结论")
+    assert after_release.value.reason is RejectionReason.HELD_BY_OTHER
+    assert coord.holder_of("hot") is None
+    assert coord.live_hold_count("A") == 0
+    assert coord.in_flight("A") == 0
+
+    # 换一个新键才是全新一次操作，可以成功占用
+    lease = coord.acquire("hot", "A", ttl=10, idem_key="fail-2")
+    print(f"[判定] 换新键 fail-2 才作为新操作成功 token={lease.fencing_token}，"
+          f"在途={coord.in_flight('A')}")
     assert lease.holder == "A"
     assert coord.in_flight("A") == 1
 
