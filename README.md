@@ -30,17 +30,26 @@
 
 占用（单个与批量）可携带客户端生成的唯一标识 `idem_key`：
 
-- 同一 `(client, idem_key)` 的整笔操作**只生效一次**：重放不换出新的
+- 同一 `(client, 操作类型, idem_key)` 的整笔操作**只生效一次**：重放不换出新的
   fencing token、不重复占用资源、不多占配额，返回与首次完全一致的结果
   （批量则返回同一组凭证，顺序也一致）。
+- **单个占用与批量申请的幂等记录各自独立**：幂等键的生效范围仅限同一种操作。
+  同一个标识先用于单个占用、再用于批量申请（或反过来），两笔操作互不影响、
+  各自执行自己的第一次，重放也只返回各自首次的结果——跨类型不会互相顶替
+  （旧实现中“批量拿到单个凭证”或因请求形状不同抛内部错误的情况已消除），
+  也不会走到未处理的错误路径。
 - 重放即使发生在配额已满时也仍返回首次结果，不再次申请许可。
-- **缺失 `idem_key`**：按一次新的占用处理（同客户端重复占用同一资源会
-  换发新凭证，但仍只占一个许可）。
+- **未提供 `idem_key`（含空串与纯空白）**：标识为 `null`、空字符串或只含
+  空白字符（空格、制表符等）时一律按“没带标识”处理，每次都是一次新的占用
+  （同客户端重复占用同一资源会换发新凭证，但仍只占一个许可）。
 - **换新的 `idem_key`**：视为一次新操作。
-- 首次请求若被拒绝（如被他人持有），不落幂等账、不留许可；冲突解除后用
-  同一个键重试会作为全新操作执行，不返回旧失败。
+- **首次结论（含被拒）原样重放**：首次请求若成功，重放返回首次凭证；首次若被
+  拒绝（如 `held_by_other`、`quota_exceeded`），拒绝结论同样落账，之后用同一个
+  标识重试会得到与首次**完全一致的拒绝**（原因码与详情相同），不会被当作新操作
+  重新执行、不会换出新的持有版本——即使冲突已解除也仍重放首次结论；要重新发起
+  请改用新标识。被拒落账不产生任何许可或资源残留，无双持有。
 - 并发重复提交（同一键双发）在锁内串行判定，只有第一次真正生效，其余
-  线程拿到首次结果，无双持有。
+  线程拿到首次结论（成功凭证或一致拒绝），无双持有。
 
 ## 批量占用（全部成功或整体失败）
 
@@ -118,4 +127,24 @@ curl -s -X POST localhost:8000/leases/acquire-batch -H 'Content-Type: applicatio
   -d '{"resources":["r1","r2"],"client":"c1","ttl":30,"idem_key":"bulk-1"}'
 curl -s -X POST localhost:8000/leases/acquire-batch -H 'Content-Type: application/json' \
   -d '{"resources":["r1","r3"],"client":"c2","ttl":30}'   # 整单 409 held_by_other
+```
+
+本轮修复的三种幂等边界可用以下方式本地验证（对应 `tests/test_idempotency.py`
+中的 `test_single_and_batch_idem_records_are_independent` /
+`test_single_after_batch_same_key_is_also_independent`、
+`test_blank_idem_key_treated_as_missing`、
+`test_first_rejection_is_replayed_with_no_residue` /
+`test_first_quota_rejection_is_replayed_without_consuming_permits`，
+HTTP 侧见 `test_cross_type_same_key_and_blank_key_over_http`、
+`test_first_rejection_replayed_over_http`）：
+
+```bash
+# 1) 单个/批量交叉使用同一标识：各自只重放自己的首次结果，互不顶替
+uv run python -m pytest tests/test_idempotency.py -q -s -k 'independent or cross_type'
+
+# 2) 空或纯空白标识按未提供处理：两次不同占用各自占上
+uv run python -m pytest tests/test_idempotency.py -q -s -k 'blank'
+
+# 3) 首次被拒后同标识重试：原样重放首次拒绝，无残留、无双持有
+uv run python -m pytest tests/test_idempotency.py -q -s -k 'rejection_is_replayed or rejection_replayed'
 ```
